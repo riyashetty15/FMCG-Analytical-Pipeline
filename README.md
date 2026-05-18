@@ -12,7 +12,7 @@ analysis, time series trend analysis, promotional effectiveness,
 and statistical testing.
  
 ---
-### Dataset: [FMCG Sales 3 Years 1M Rows — Kaggle](https://www.kaggle.com/datasets/robertocarlost/fmcg-multi-country-sales-dataset)
+### Dataset: [FMCG Sales 3 Years 1M Rows - Kaggle](https://www.kaggle.com/datasets/robertocarlost/fmcg-multi-country-sales-dataset)
 ---
 ## What This Project Does
  
