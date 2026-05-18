@@ -1,0 +1,576 @@
+---
+title: "demo"
+output: html_document
+date: "2026-05-15"
+---
+
+```{r}
+install.packages(c(
+  "ggplot2",
+  "dplyr",
+  "tidyr",
+  "tidyverse",
+  "lubridate",
+  "stringr",
+  "slider",
+  "janitor",
+  "gt",
+  "glue",
+  "scales",
+  "patchwork",
+  "GGally",
+  "arm"
+))
+```
+
+```{r}
+library(dplyr);   
+library(tidyr);   
+library(lubridate)
+library(stringr); 
+library(ggplot2); 
+library(slider)
+library(janitor); 
+library(gt);      
+library(glue)
+library(scales);  
+library(patchwork)
+```
+
+```{r}
+df<-read.csv("fmcg_sales.csv") %>%
+  as_tibble()
+cat(glue("
+Dataset loaded:
+  Rows:        {nrow(df)}
+  Columns:     {ncol(df)}
+  Date range:  {min(df$date)} to {max(df$date)}
+  Categories:  {paste(unique(df$category), collapse=', ')}
+  Brands:      {paste(unique(df$brand), collapse=', ')}
+  SKUs:        {n_distinct(df$sku_id)}
+  Stores:      {n_distinct(df$store_id)}
+\n"))
+```
+```{r}
+dq_audit <- tibble(
+  Check = c(
+    "Total rows",
+    "Missing values (any column)",
+    "Negative margin (selling below cost)",
+    "Stock-out + units sold > 0 (impossible)",
+    "Zero units sold",
+    "Discount > 0 but promo_flag = 0",
+    "gross_sales ≠ units × list_price (rounding issues)"
+  ),
+  Count = c(
+    nrow(df),
+    sum(!complete.cases(df)),
+    sum(df$margin_pct < 0),
+    sum(df$stock_out_flag == 1 & df$units_sold > 0),
+    sum(df$units_sold == 0),
+    sum(df$discount_pct > 0 & df$promo_flag == 0),
+    sum(abs(df$gross_sales -
+              df$units_sold * df$list_price) > 0.02)
+  )) %>%
+  mutate(
+    Pct    = paste0(round(Count / nrow(df) * 100, 3), "%"),
+    Status = case_when(
+      Check == "Total rows"   ~ "ℹ Info",
+      Count == 0              ~ "✓ Pass",
+      TRUE                    ~ "✗ Review"
+    )
+  )
+print(dq_audit)
+```
+```{r}
+stockout_issue <- df %>%
+  filter(stock_out_flag == 1, units_sold > 0) %>%
+  group_by(category, sku_name) %>%
+  summarise(
+    n_rows          = n(),
+    avg_units_sold  = round(mean(units_sold), 1),
+    total_net_sales = round(sum(net_sales), 0),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(n_rows))
+ 
+cat("Stock-out contradiction by SKU:\n")
+print(head(stockout_issue, 10))
+ 
+cat("\nLikely cause: stock_out_flag = 1 marks days when stock",
+    "REACHED zero, not days with zero opening stock.\n",
+    "Units were sold before the flag triggered.\n")
+```
+```{r}
+n_raw <- nrow(df)
+df_clean <- df %>%
+  # Parse date properly
+  mutate(date = as.Date(date)) %>%
+  # Flag (don't remove) rows with negative margin
+  # — keep them for investigation
+  mutate(
+    margin_flag = margin_pct < 0,
+    stockout_contradiction = stock_out_flag == 1 & units_sold > 0
+  ) %>%
+  # Calculate actual discount amount
+  mutate(
+    discount_amt  = gross_sales - net_sales,
+    effective_price = net_sales / units_sold,
+    # Revenue metrics
+    gross_margin_eur = net_sales - (units_sold * purchase_cost),
+    gross_margin_pct = round(gross_margin_eur / net_sales, 4)
+  ) %>%
+  # Fiscal/calendar features
+  mutate(
+    # ISO week
+    iso_week = isoweek(date),
+    # Quarter
+    quarter = paste0("Q", quarter(date)),
+    # Year-Quarter label
+    yr_q = paste0(year, "-", paste0("Q", quarter(date))),
+    # Season (useful for this dataset which has temperature!)
+    season = case_when(
+      month %in% c(12, 1, 2) ~ "Winter",
+      month %in% c(3, 4, 5)  ~ "Spring",
+      month %in% c(6, 7, 8)  ~ "Summer",
+      TRUE                    ~ "Autumn"
+    ),
+    # Temperature bands (unique to this dataset)
+    temp_band = case_when(
+      temperature < 5   ~ "Cold (<5°C)",
+      temperature < 15  ~ "Mild (5-15°C)",
+      temperature < 25  ~ "Warm (15-25°C)",
+      TRUE              ~ "Hot (>25°C)"
+    ),
+    # Promotion type
+    promo_type = case_when(
+      promo_flag == 1 & discount_pct >= 0.30 ~ "Deep promo (30%+)",
+      promo_flag == 1 & discount_pct >= 0.15 ~ "Mid promo (15-30%)",
+      promo_flag == 1                         ~ "Light promo (<15%)",
+      TRUE                                    ~ "Non-promo"
+    )
+  )
+
+stopifnot(nrow(df_clean) == n_raw)
+cat(glue("Cleaning complete. Rows: {nrow(df_clean)} (unchanged)\n"))
+cat(glue("New columns added: margin_flag, stockout_contradiction,\n",
+         "  discount_amt, effective_price, gross_margin_eur,\n",
+         "  iso_week, quarter, yr_q, season, temp_band, promo_type\n"))
+```
+```{r}
+category_perf <- df_clean %>%
+  group_by(category) %>%
+  summarise(
+    total_net_sales  = sum(net_sales, na.rm = TRUE),
+    total_units      = sum(units_sold, na.rm = TRUE),
+    avg_margin_pct   = round(mean(margin_pct, na.rm = TRUE), 3),
+    n_skus           = n_distinct(sku_id),
+    n_promo_days     = sum(promo_flag),
+    promo_pct        = round(mean(promo_flag) * 100, 1),
+    stockout_days    = sum(stock_out_flag),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    revenue_share = round(total_net_sales /
+                            sum(total_net_sales) * 100, 2)
+  ) %>%
+  arrange(desc(total_net_sales))
+ 
+cat("Category performance:\n")
+print(category_perf %>%
+        mutate(total_net_sales = paste0("€",
+                 format(round(total_net_sales), big.mark=","))))
+```
+```{r}
+brand_share <- df_clean %>%
+  group_by(category, brand) %>%
+  summarise(
+    net_sales = sum(net_sales, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  group_by(category) %>%
+  mutate(
+    share_pct = round(net_sales / sum(net_sales) * 100, 2)
+  ) %>%
+  ungroup() %>%
+  arrange(category, desc(share_pct))
+ 
+cat("\nBrand share by category (top 3 per category):\n")
+print(brand_share %>%
+        group_by(category) %>%
+        slice_head(n = 3) %>%
+        ungroup())
+```
+```{r}
+flag_outlier <- function(x, n_sd = 3) {
+  abs(x - mean(x, na.rm = TRUE)) > n_sd * sd(x, na.rm = TRUE)
+}
+ 
+df_flagged <- df_clean %>%
+  mutate(across(
+    c(units_sold, net_sales, margin_pct, stock_on_hand),
+    ~ flag_outlier(.x),
+    .names = "flag_{.col}"
+  ))
+ 
+cat("\nOutliers flagged (3-SD method):\n")
+df_flagged %>%
+  summarise(across(starts_with("flag_"), sum, na.rm = TRUE)) %>%
+  print()
+```
+```{r}
+sku_performance <- df_clean %>%
+  group_by(sku_id, sku_name, category, brand) %>%
+  summarise(
+    total_net_sales = sum(net_sales),
+    avg_margin      = mean(margin_pct),
+    total_units     = sum(units_sold),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    performance_tier = case_when(
+      total_net_sales >= quantile(total_net_sales, 0.80) &
+        avg_margin >= 0.35   ~ "Star (High revenue + High margin)",
+      total_net_sales >= quantile(total_net_sales, 0.80) &
+        avg_margin <  0.35   ~ "Volume (High revenue + Low margin)",
+      total_net_sales <  quantile(total_net_sales, 0.20) &
+        avg_margin >= 0.35   ~ "Niche (Low revenue + High margin)",
+      total_net_sales <  quantile(total_net_sales, 0.20) &
+        avg_margin <  0.35   ~ "Review (Low revenue + Low margin)",
+      TRUE                   ~ "Mid-tier"
+    )
+  )
+ 
+cat("\nSKU performance tiers:\n")
+print(sku_performance %>% count(performance_tier, sort = TRUE))
+```
+```{r}
+sku_master <- df_clean %>%
+  distinct(sku_id, sku_name, category, subcategory,
+           brand, list_price) %>%
+  mutate(
+    price_tier = case_when(
+      list_price < 3.00  ~ "Budget",
+      list_price < 7.00  ~ "Mid-range",
+      list_price < 11.00 ~ "Premium",
+      TRUE               ~ "Luxury"
+    )
+  )
+ 
+cat("SKU master rows:", nrow(sku_master), "\n")
+cat("Expected: same as n_distinct(sku_id) =",
+    n_distinct(df_clean$sku_id), "\n")
+```
+
+```{r}
+n_dupes_in_master <- sum(duplicated(sku_master$sku_id))
+cat("Duplicate SKU IDs in master:", n_dupes_in_master, "\n")
+stopifnot(n_dupes_in_master == 0)
+
+n_before <- nrow(df_clean)
+fmcg_enriched <- df_clean %>%
+  left_join(
+    sku_master %>% dplyr::select(sku_id, price_tier),
+    by = "sku_id",
+    relationship = "many-to-one"
+  )
+
+print(head(fmcg_enriched))
+```
+```{r}
+stopifnot(nrow(fmcg_enriched) == n_before)
+cat("✓ Join validated — row count unchanged:",
+    nrow(fmcg_enriched), "\n")
+
+orphan_txns <- df_clean %>%
+  anti_join(sku_master, by = "sku_id")
+cat("Transactions with no SKU master match:",
+    nrow(orphan_txns), "\n")
+```
+```{r}
+premium_skus <- sku_master %>%
+  filter(price_tier %in% c("Premium", "Luxury"))
+ 
+n_before_inner <- nrow(df_clean)
+ 
+premium_txns <- df_clean %>%
+  inner_join(premium_skus %>% dplyr::select(sku_id, price_tier),
+             by = "sku_id")
+```
+
+```{r}
+stopifnot(nrow(premium_txns) <= n_before_inner)
+cat(glue(
+  "inner_join result: {nrow(premium_txns)} rows",
+  " (from {n_before_inner} — only Premium/Luxury SKU transactions)\n",
+  "Rows dropped: {n_before_inner - nrow(premium_txns)}",
+  " (Budget/Mid-range SKUs excluded)\n"
+))
+```
+```{r}
+monthly_brand_wide <- df_clean %>%
+  mutate(yr_month = format(date, "%Y-%m")) %>%
+  group_by(brand, yr_month) %>%
+  summarise(net_sales = round(sum(net_sales)), .groups = "drop") %>%
+  pivot_wider(
+    names_from  = yr_month,
+    values_from = net_sales,
+    values_fill = 0
+  )
+ 
+cat("Wide format (brands × months):",
+    nrow(monthly_brand_wide), "brands ×",
+    ncol(monthly_brand_wide) - 1, "months\n")
+print(monthly_brand_wide)
+```
+```{r}
+monthly_brand_long <- monthly_brand_wide %>%
+  pivot_longer(
+    cols      = -brand,          # pivot every column EXCEPT brand
+    names_to  = "yr_month",      # column names become values in this col
+    values_to = "net_sales"      # cell values go into this column
+  ) %>%
+  mutate(yr_month = as.Date(paste0(yr_month, "-01"))) %>%
+  arrange(brand, yr_month)
+ 
+# Validate: long format has brand × month rows
+stopifnot(
+  nrow(monthly_brand_long) ==
+    n_distinct(monthly_brand_wide$brand) *
+    (ncol(monthly_brand_wide) - 1)
+)
+ 
+cat("Long format (brand × month rows):", nrow(monthly_brand_long),
+    "\n")
+cat("Now usable for ggplot2, group_by(yr_month), lm(), etc.\n")
+print(monthly_brand_long)
+```
+```{r}
+monthly_growth <- monthly_brand_long %>%
+  group_by(brand) %>%
+  arrange(yr_month) %>%
+  mutate(
+    mom_growth = round((net_sales - lag(net_sales)) /
+                         lag(net_sales) * 100, 1)
+  ) %>%
+  ungroup()
+
+cat("\nMonth-on-month growth (only possible after pivot_longer):\n")
+print(monthly_growth %>%
+        filter(!is.na(mom_growth)) %>%
+        group_by(brand) %>%
+        summarise(
+          avg_mom_growth = round(mean(mom_growth, na.rm=TRUE), 2),
+          max_mom_growth = max(mom_growth, na.rm=TRUE),
+          min_mom_growth = min(mom_growth, na.rm=TRUE),
+          .groups = "drop"
+        ))
+```
+```{r}
+yoy_table <- df_clean %>%
+  group_by(category, year) %>%
+  summarise(net_sales = round(sum(net_sales)), .groups = "drop") %>%
+  pivot_wider(
+    names_from  = year,
+    values_from = net_sales,
+    names_prefix = "Y"
+  ) %>%
+  mutate(
+    growth_21_22 = round((Y2022 - Y2021) / Y2021 * 100, 1),
+    growth_22_23 = round((Y2023 - Y2022) / Y2022 * 100, 1)
+  )
+ 
+cat("\nYoY revenue growth by category:\n")
+print(yoy_table %>%
+        mutate(across(starts_with("Y"),
+                      ~ paste0("€", format(., big.mark = ",")))))
+```
+```{r}
+segment_report <- function(df, group_col, min_rows = 100) {
+  df %>%
+    group_by({{ group_col }}) %>%
+    summarise(
+      n_rows          = n(),
+      total_net_sales = round(sum(net_sales), 0),
+      avg_net_sales   = round(mean(net_sales), 2),
+      avg_margin_pct  = round(mean(margin_pct, na.rm = TRUE), 3),
+      promo_rate      = round(mean(promo_flag) * 100, 1),
+      avg_discount    = round(mean(discount_pct) * 100, 1),
+      stockout_rate   = round(mean(stock_out_flag) * 100, 2),
+      .groups = "drop"
+    ) %>%
+    filter(n_rows >= min_rows) %>%
+    mutate(
+      revenue_share = round(total_net_sales /
+                              sum(total_net_sales) * 100, 2)
+    ) %>%
+    arrange(desc(total_net_sales))
+}
+ 
+cat("segment_report by category:\n")
+print(segment_report(df_clean, category))
+ 
+cat("\nsegment_report by brand:\n")
+print(segment_report(df_clean, brand))
+ 
+cat("\nsegment_report by season:\n")
+print(segment_report(df_clean, season))
+```
+```{r}
+trend_summary <- function(df, value_col, group_col,
+                          time_col = iso_week,
+                          roll_window = 4) {
+  df %>%
+    group_by({{ group_col }}, {{ time_col }}) %>%
+    summarise(
+      value = sum({{ value_col }}, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    arrange({{ group_col }}, {{ time_col }}) %>%
+    group_by({{ group_col }}) %>%
+    mutate(
+      rolling_avg = slide_dbl(value, mean,
+                              .before = roll_window - 1,
+                              .complete = FALSE),
+      rolling_sd  = slide_dbl(value, sd,
+                              .before = roll_window - 1,
+                              .complete = FALSE),
+      is_anomaly  = abs(value - rolling_avg) >
+                    2 * rolling_sd
+    ) %>%
+    ungroup()
+}
+ 
+cat("\nTrend anomalies in net_sales by category:\n")
+anomalies <- trend_summary(df_clean, net_sales, category) %>%
+  filter(is_anomaly == TRUE) %>%
+  count(category, sort = TRUE)
+print(anomalies)
+```
+```{r}
+daily_sales <- df_clean %>%
+  group_by(date, category) %>%
+  summarise(
+    net_sales  = sum(net_sales),
+    units_sold = sum(units_sold),
+    .groups = "drop"
+  ) %>%
+  arrange(category, date) %>%
+  group_by(category) %>%
+  mutate(
+    roll_7d_sales  = slide_dbl(net_sales, mean,
+                                .before = 6,
+                                .complete = FALSE),
+    roll_28d_sales = slide_dbl(net_sales, mean,
+                                .before = 27,
+                                .complete = FALSE),
+    roll_7d_sd     = slide_dbl(net_sales, sd,
+                                .before = 6,
+                                .complete = FALSE),
+    upper_2sd      = roll_7d_sales + 2 * roll_7d_sd,
+    lower_2sd      = roll_7d_sales - 2 * roll_7d_sd,
+    is_anomaly     = net_sales > upper_2sd |
+                     net_sales < lower_2sd
+  ) %>%
+  ungroup()
+ 
+cat("Daily sales anomalies by category:\n")
+daily_sales %>%
+  filter(is_anomaly) %>%
+  count(category, sort = TRUE) %>%
+  print()
+```
+```{r}
+monthly_bev <- df_clean %>%
+  filter(category == "Beverages") %>%
+  mutate(yr_month = format(date, "%Y-%m")) %>%
+  group_by(yr_month) %>%
+  summarise(
+    net_sales  = sum(net_sales),
+    units_sold = sum(units_sold),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    mean_sales = mean(net_sales),
+    sd_sales   = sd(net_sales),
+    is_anomaly = net_sales < mean_sales - 1.5 * sd_sales
+  )
+ 
+worst_month <- monthly_bev %>%
+  filter(is_anomaly) %>%
+  arrange(net_sales) %>%
+  pull(yr_month) %>%
+  first()
+ 
+cat("Step 1 — Anomaly months in Beverages:\n")
+print(monthly_bev %>%
+        filter(is_anomaly) %>%
+        dplyr::select(yr_month, net_sales, is_anomaly))
+ 
+if (!is.na(worst_month)) {
+ 
+  # STEP 2: DECOMPOSE — which subcategory/brand drives the drop?
+  prev_month <- format(as.Date(paste0(worst_month, "-01")) - 1,
+                       "%Y-%m")
+ 
+  step2 <- df_clean %>%
+    filter(category == "Beverages",
+           format(date, "%Y-%m") %in%
+             c(prev_month, worst_month)) %>%
+    mutate(period = format(date, "%Y-%m")) %>%
+    group_by(period, subcategory) %>%
+    summarise(net_sales = sum(net_sales), .groups = "drop") %>%
+    pivot_wider(names_from = period,
+                values_from = net_sales,
+                values_fill = 0)
+ 
+  cat("\nStep 2 — Decompose by subcategory",
+      prev_month, "vs", worst_month, ":\n")
+  if (ncol(step2) >= 3) {
+    colnames(step2)[2:3] <- c("prev", "target")
+    step2 <- step2 %>%
+      mutate(pct_chg = round((target - prev) / prev * 100, 1)) %>%
+      arrange(pct_chg)
+    print(step2)
+  }
+ 
+  # STEP 3: DISTINGUISH CAUSE
+  # Is it fewer promo days, stockouts, or lower base demand?
+  step3 <- df_clean %>%
+    filter(category == "Beverages",
+           format(date, "%Y-%m") %in%
+             c(prev_month, worst_month)) %>%
+    mutate(period = format(date, "%Y-%m")) %>%
+    group_by(period) %>%
+    summarise(
+      n_days        = n_distinct(date),
+      promo_rate    = round(mean(promo_flag) * 100, 1),
+      stockout_rate = round(mean(stock_out_flag) * 100, 2),
+      avg_daily_rev = round(sum(net_sales) / n_distinct(date), 0),
+      avg_discount  = round(mean(discount_pct) * 100, 1),
+      .groups = "drop"
+    )
+ 
+  cat("\nStep 3 — Promo/stockout vs revenue:\n")
+  print(step3)
+ 
+  # STEP 4: DOCUMENT
+  cat(glue("\nStep 4 — RCA Summary:\n",
+    "Worst month: {worst_month}\n",
+    "Category: Beverages\n",
+    "Recommendation: Check if promo_rate dropped or stockout_rate",
+    " increased in {worst_month} vs {prev_month}.\n",
+    "If promo_rate dropped → revenue loss driven by",
+    " end of promotion, not market shift.\n",
+    "If stockout_rate increased → supply chain issue",
+    " — escalate to operations.\n"
+  ))
+}
+
+cat("Category names:", unique(df_clean$category), "\n")
+cat("Date class:", class(df_clean$date), "\n")
+cat("Monthly bev rows:", nrow(monthly_bev), "\n")
+cat("Anomalies found:", sum(monthly_bev$is_anomaly), "\n")
+cat("worst_month value:", worst_month, "\n")
+cat("is.na(worst_month):", is.na(worst_month), "\n")
+```
