@@ -51,14 +51,14 @@ A `tibble()` was manually constructed where each row represents
 one check and each column represents the result. The `Count`
 column runs live calculations using vectorised logical operations:
  
-- `sum(!complete.cases(df))` — counts rows with any missing value
-- `sum(df$margin_pct < 0)` — flags below-cost selling
-- `sum(df$stock_out_flag == 1 & df$units_sold > 0)` — detects
+- `sum(!complete.cases(df))` : counts rows with any missing value
+- `sum(df$margin_pct < 0)` : flags below-cost selling
+- `sum(df$stock_out_flag == 1 & df$units_sold > 0)` : detects
   logical contradictions using `&` to combine two conditions
-- `sum(abs(gross  units * price) > 0.02)` — validates the
+- `sum(abs(gross  units * price) > 0.02)` : validates the
   mathematical relationship between columns
 A `case_when()` then classifies each check as Pass, Review,
-or Info — producing a structured audit table rather than
+or Info, producing a structured audit table rather than
 scattered `cat()` statements.
  
 **Key R concepts:** `tibble()`, `complete.cases()`, vectorised
@@ -69,7 +69,7 @@ logical operations, `case_when()`, `paste0()` for formatting.
 ### 2. Data Cleaning and Feature Engineering
  
 **What was done:**
-Issues found in the audit were resolved systematically —
+Issues found in the audit were resolved systematically,
 each step documented, each decision justified. The key
 principle applied was **cap rather than remove** for outliers,
 preserving data integrity while controlling their influence.
@@ -82,15 +82,15 @@ in one pass through the data:
  
 - `as.Date()` converts the character date column to a proper
   Date type, enabling all lubridate operations downstream
-- `pmin(spend, cap_value)` caps outliers at the 99th percentile —
+- `pmin(spend, cap_value)` caps outliers at the 99th percentile,
   `pmin()` is element-wise minimum, safer than `ifelse()` for this
 - `isoweek()`, `quarter()`, `month()` extract time components
   for grouping and trend analysis
 - `case_when()` builds categorical features: season, temperature
-  band, and promotion type — all derived from existing columns
+  band, and promotion type, all derived from existing columns
   rather than hardcoded lookups
 A `stopifnot(nrow(clean) == nrow(raw))` check after cleaning
-confirms no rows were accidentally dropped — a defensive
+confirms no rows were accidentally dropped, a defensive
 programming pattern that catches silent data loss.
  
 **Key R concepts:** `mutate()`, `as.Date()`, `pmin()`,
@@ -122,7 +122,7 @@ ungroup()
 ```
  
 The second `group_by()` after `summarise()` is the critical
-pattern — it allows `sum(net_sales)` in `mutate()` to refer
+pattern, it allows `sum(net_sales)` in `mutate()` to refer
 to the category total rather than the grand total, giving
 share within category not share of everything.
  
@@ -131,7 +131,7 @@ to multiple columns simultaneously with `.names = "flag_{.col}"`
 generating consistently named output columns automatically.
  
 `quantile(x, 0.80)` was used to define performance tier
-thresholds dynamically — the top 20% cutoff adapts to the
+thresholds dynamically, the top 20% cutoff adapts to the
 actual data distribution rather than a hardcoded number.
  
 **Key R concepts:** two-stage `group_by()`, `summarise()`,
@@ -150,7 +150,7 @@ for three different purposes.
  
 **How it was implemented:**
 `distinct()` collapsed 1M transaction rows to 84 unique SKUs
-by specifying the columns that define product identity —
+by specifying the columns that define product identity,
 excluding transactional columns like `units_sold` and `date`
 which vary by row. The result was validated immediately:
  
@@ -163,14 +163,14 @@ a many-to-many join risk that this check catches before it
 silently inflates downstream row counts.
  
 Three joins were used with different intentions:
-- `left_join()` — enrich all transactions with price tier,
+- `left_join()`: enrich all transactions with price tier,
   keeping every row regardless of match
-- `anti_join()` — find transactions with no matching SKU
+- `anti_join()`: find transactions with no matching SKU
   record, surfacing data gaps
-- `inner_join()` — restrict analysis to Premium/Luxury SKUs
+- `inner_join()`: restrict analysis to Premium/Luxury SKUs
   only, intentionally dropping unmatched rows
 `relationship = "many-to-one"` was declared on the left join
-to make R enforce key uniqueness in the lookup table — it
+to make R enforce key uniqueness in the lookup table, it
 throws an error rather than silently inflating rows if the
 assumption is violated.
  
@@ -223,7 +223,7 @@ to run across any segment or metric with a single call.
  
 **How it was implemented:**
 The `{{ }}` (curly-curly) operator from rlang enables tidy
-evaluation — passing column names as function arguments to
+evaluation, passing column names as function arguments to
 dplyr verbs. Without it, `group_by(group_col)` would look
 for a column literally called "group_col". With it, R unwraps
 the argument and uses whatever column name was passed:
@@ -268,11 +268,11 @@ week-to-week variation.
 `slide_dbl()` from the `slider` package computes rolling
 window statistics. Two critical setup steps must precede it:
  
-1. `arrange(category, date)` — `slide_dbl()` is
+1. `arrange(category, date)`, `slide_dbl()` is
    position-dependent, operating on physically adjacent rows.
    Without sorting, it averages non-consecutive dates producing
    meaningless results.
-2. `group_by(category)` before `mutate()` — makes the rolling
+2. `group_by(category)` before `mutate()`, makes the rolling
    window restart at the beginning of each category rather than
    running continuously across category boundaries.
 ```r
@@ -294,7 +294,7 @@ self-calibrating thresholds.
  
 ---
  
-### 8. Root Cause Analysis — 4-Step Workflow
+### 8. Root Cause Analysis: 4-Step Workflow
  
 **What was done:**
 A structured investigation was conducted into a Beverages
@@ -304,26 +304,26 @@ cause from symptom, document findings and recommend action.
  
 **How it was implemented:**
  
-**Step 1 — Isolate:** Monthly totals were computed and
+**Step 1: Isolate:** Monthly totals were computed and
 compared against their own mean ± 1.5 SD. `format(date, "%Y-%m")`
 groups days into months without needing a separate date
 truncation step.
  
-**Step 2 — Decompose:** The anomaly month was compared to
-the prior month across subcategories using `pivot_wider()` —
+**Step 2: Decompose:** The anomaly month was compared to
+the prior month across subcategories using `pivot_wider()`,
 long format with two periods becomes a wide comparison table,
 enabling `mutate(pct_chg = (target - prev) / prev * 100)`.
 `format(as.Date(paste0(month, "-01")) - 1, "%Y-%m")` derives
 the prior month without a lookup table.
  
-**Step 3 — Distinguish cause:** `n_distinct(date)` counts
+**Step 3: Distinguish cause:** `n_distinct(date)` counts
 active trading days, `mean(promo_flag)` gives the promotional
-rate, and `mean(stock_out_flag)` gives the stock-out rate —
+rate, and `mean(stock_out_flag)` gives the stock-out rate,
 all within the same `summarise()` call. Comparing these
 between the anomaly month and the prior month distinguishes
 a supply problem from a demand problem.
  
-**Step 4 — Document:** `glue()` builds the summary message
+**Step 4: Document:** `glue()` builds the summary message
 by interpolating computed values directly into text,
 producing a readable, data-driven conclusion rather than
 a hardcoded string.
@@ -338,7 +338,7 @@ parameterised conclusions.
  
 **What was done:**
 Three statistical tests were applied to answer specific
-business questions — always reporting both statistical
+business questions, always reporting both statistical
 significance (p-value) and practical significance (effect
 size) together, since large datasets make almost everything
 statistically significant regardless of practical relevance.
@@ -432,7 +432,7 @@ interpretation with `case_when()`.
 **What was done:**
 Four publication-ready charts were produced covering the
 key analytical themes, revenue trends, promo margin impact,
-weather correlation, and brand share evolution — combined
+weather correlation, and brand share evolution, combined
 into a single dashboard image.
  
 **How it was implemented:**
@@ -497,12 +497,12 @@ function encapsulation, loop-driven report generation.
  
 | Package | Purpose |
 |---|---|
-| dplyr | Core data manipulation — group_by, joins, mutate |
-| tidyr | Reshaping — pivot_longer, pivot_wider |
+| dplyr | Core data manipulation, group_by, joins, mutate |
+| tidyr | Reshaping, pivot_longer, pivot_wider |
 | lubridate | Date parsing and feature extraction |
 | stringr | String cleaning and pattern matching |
-| slider | Rolling window functions — slide_dbl() |
-| janitor | Duplicate detection — get_dupes() |
+| slider | Rolling window functions, slide_dbl() |
+| janitor | Duplicate detection, get_dupes() |
 | ggplot2 | Visualisation |
 | patchwork | Multi-panel chart layouts |
 | gt | Formatted output tables |
@@ -547,7 +547,7 @@ Defensive Programming → stopifnot(), relationship= in joins,
 ```
 fmcg-data-quality-analysis/
 │
-├── fmcg_analysis.R          # Main analysis — all 15 sections
+├── fmcg_analysis.R          # Main analysis, all 15 sections
 ├── FMCG_README.md           # This file
 └── data/
     └── fmcg_sales_3years_1M_rows.csv   # Add dataset from Kaggle
