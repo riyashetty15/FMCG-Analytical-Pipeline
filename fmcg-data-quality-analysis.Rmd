@@ -574,3 +574,132 @@ cat("Anomalies found:", sum(monthly_bev$is_anomaly), "\n")
 cat("worst_month value:", worst_month, "\n")
 cat("is.na(worst_month):", is.na(worst_month), "\n")
 ```
+```{r}
+kw_season <- kruskal.test(
+  net_sales ~ season,
+  data = df_clean %>%
+    group_by(date, season) %>%
+    summarise(net_sales = sum(net_sales), .groups = "drop")
+)
+ 
+cat("Kruskal-Wallis test — daily sales by season:\n")
+cat("  Chi-sq:", round(kw_season$statistic, 2),
+    "| p-value:", format.pval(kw_season$p.value, digits = 3), "\n")
+cat("  Significant (p<0.05):", kw_season$p.value < 0.05, "\n\n")
+```
+```{r}
+promo_sales    <- df_clean %>%
+  filter(promo_flag == 1) %>% pull(net_sales)
+nonpromo_sales <- df_clean %>%
+  filter(promo_flag == 0) %>% pull(net_sales)
+ 
+wt_promo <- wilcox.test(promo_sales, nonpromo_sales)
+ 
+cat("Wilcoxon test — promo vs non-promo transaction revenue:\n")
+cat("  Promo median:     €", round(median(promo_sales), 2), "\n")
+cat("  Non-promo median: €", round(median(nonpromo_sales), 2), "\n")
+cat("  p-value:", format.pval(wt_promo$p.value, digits = 3), "\n")
+cat("  Significant:", wt_promo$p.value < 0.05, "\n\n")
+```
+```{r}
+two_prop_ztest <- function(p1, n1, p2, n2, label1, label2) {
+  p_pool <- (p1*n1 + p2*n2) / (n1+n2)
+  se     <- sqrt(p_pool*(1-p_pool)*(1/n1+1/n2))
+  z      <- (p1-p2)/se
+  p_val  <- 2*(1-pnorm(abs(z)))
+  tibble(
+    Comparison = paste(label1, "vs", label2),
+    Share1     = paste0(round(p1*100,2), "%"),
+    Share2     = paste0(round(p2*100,2), "%"),
+    Diff_pp    = round((p2-p1)*100, 2),
+    Z_stat     = round(z, 3),
+    P_value    = round(p_val, 4),
+    Significant = p_val < 0.05
+  )
+}
+
+brand_yr_shares <- df_clean %>%
+  group_by(year, brand) %>%
+  summarise(net_sales = sum(net_sales), .groups = "drop") %>%
+  group_by(year) %>%
+  mutate(share = net_sales / sum(net_sales)) %>%
+  ungroup()
+ 
+branda_22 <- brand_yr_shares %>%
+  filter(brand == "BrandA", year == 2022) %>% 
+  pull(share)
+branda_23 <- brand_yr_shares %>%
+  filter(brand == "BrandA", year == 2023) %>% 
+  pull(share)
+
+n_22 <- nrow(df_clean %>% 
+               filter(year == 2022))
+n_23 <- nrow(df_clean %>% 
+               filter(year == 2023))
+ 
+cat("Two-proportion z-test — BrandA share 2022 vs 2023:\n")
+print(two_prop_ztest(branda_22, n_22, branda_23, n_23,
+                     "BrandA 2022", "BrandA 2023"))
+```
+```{r}
+promo_effectiveness <- df_clean %>%
+  group_by(category, promo_type) %>%
+  summarise(
+    n_rows          = n(),
+    avg_units       = round(mean(units_sold), 1),
+    avg_net_sales   = round(mean(net_sales), 2),
+    avg_margin      = round(mean(margin_pct, na.rm = TRUE), 3),
+    avg_discount    = round(mean(discount_pct) * 100, 1),
+    revenue_per_eur_discount = round(
+      sum(net_sales) / max(sum(discount_amt), 1), 2
+    ),
+    .groups = "drop"
+  ) %>%
+  arrange(category, promo_type)
+
+cat("Promo effectiveness by category:\n")
+print(promo_effectiveness)
+```
+```{r}
+promo_uplift <- df_clean %>%
+  group_by(sku_id, sku_name, promo_flag) %>%
+  summarise(
+    avg_daily_units = mean(units_sold),
+    avg_daily_rev   = mean(net_sales),
+    .groups = "drop"
+  ) %>%
+  pivot_wider(
+    id_cols     = c(sku_id, sku_name),
+    names_from  = promo_flag,
+    values_from = c(avg_daily_units, avg_daily_rev),
+    names_prefix = "promo_"
+  ) %>%
+  rename_with(~ str_replace(., "promo_0", "base"),
+              contains("promo_0")) %>%
+  rename_with(~ str_replace(., "promo_1", "promo"),
+              contains("promo_1")) %>%
+  mutate(
+    unit_uplift_pct = round(
+      (avg_daily_units_promo - avg_daily_units_base) /
+        avg_daily_units_base * 100, 1),
+    rev_uplift_pct = round(
+      (avg_daily_rev_promo - avg_daily_rev_base) /
+        avg_daily_rev_base * 100, 1)
+  ) %>%
+  arrange(desc(unit_uplift_pct))
+ 
+cat("\nTop SKUs by promo unit uplift:\n")
+print(head(promo_uplift %>%
+             dplyr::select(sku_name, unit_uplift_pct, rev_uplift_pct), 10))
+```
+```{r}
+```
+```{r}
+```
+```{r}
+```
+```{r}
+```
+```{r}
+```
+
