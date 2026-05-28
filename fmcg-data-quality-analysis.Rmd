@@ -480,7 +480,9 @@ daily_sales %>%
   count(category, sort = TRUE) %>%
   print()
 ```
+RCA on Beverages Net Sales
 ```{r}
+# STEP 1: ISOLATE — confirm the anomaly
 monthly_bev <- df_clean %>%
   filter(category == "Beverages") %>%
   mutate(yr_month = format(date, "%Y-%m")) %>%
@@ -691,6 +693,172 @@ promo_uplift <- df_clean %>%
 cat("\nTop SKUs by promo unit uplift:\n")
 print(head(promo_uplift %>%
              dplyr::select(sku_name, unit_uplift_pct, rev_uplift_pct), 10))
+```
+```{r}
+weather_sales <- df_clean %>%
+  filter(category == "Beverages") %>%
+  group_by(date, temp_band, season) %>%
+  summarise(
+    net_sales    = sum(net_sales),
+    units_sold   = sum(units_sold),
+    temperature  = mean(temperature),
+    rain_mm      = mean(rain_mm),
+    .groups = "drop"
+  )
+
+cor_temp <- cor(weather_sales$temperature,
+                weather_sales$net_sales,
+                use = "complete.obs")
+ 
+cat(glue("Temperature vs Beverages sales correlation: {round(cor_temp,3)}\n"))
+cat(case_when(
+  cor_temp > 0.3  ~ "Positive correlation — hot weather drives sales\n",
+  cor_temp < -0.3 ~ "Negative correlation — cold weather drives sales\n",
+  TRUE            ~ "Weak correlation — temperature has limited impact\n"
+))
+ 
+```
+```{r}
+weather_summary <- weather_sales %>%
+  group_by(temp_band) %>%
+  summarise(
+    n_days         = n(),
+    avg_daily_rev  = round(mean(net_sales), 0),
+    avg_daily_units = round(mean(units_sold), 1),
+    .groups = "drop"
+  ) %>%
+  arrange(temp_band)
+ 
+cat("\nBeverages sales by temperature band:\n")
+print(weather_summary)
+ 
+# Does rain affect sales?
+cor_rain <- cor(weather_sales$rain_mm,
+                weather_sales$net_sales,
+                use = "complete.obs")
+cat(glue("\nRain vs Beverages sales correlation: {round(cor_rain,3)}\n"))
+```
+```{r}
+stockout_analysis <- df_clean %>%
+  group_by(category, sku_name) %>%
+  summarise(
+    total_days      = n(),
+    stockout_days   = sum(stock_out_flag),
+    stockout_rate   = round(mean(stock_out_flag) * 100, 2),
+    avg_daily_rev_normal = mean(net_sales[stock_out_flag == 0],
+                                na.rm = TRUE),
+    # Estimate lost revenue = stockout days × avg normal daily rev
+    est_lost_rev    = round(
+      stockout_days *
+        mean(net_sales[stock_out_flag == 0], na.rm = TRUE), 0
+    ),
+    .groups = "drop"
+  ) %>%
+  filter(stockout_days > 0) %>%
+  arrange(desc(est_lost_rev))
+ 
+cat("Top SKUs by estimated lost revenue from stock-outs:\n")
+print(head(stockout_analysis %>%
+             dplyr::select(sku_name, stockout_days,
+                    stockout_rate, est_lost_rev), 10) %>%
+        mutate(est_lost_rev = paste0("€",
+                 format(est_lost_rev, big.mark = ","))))
+ 
+total_lost <- sum(stockout_analysis$est_lost_rev, na.rm = TRUE)
+cat(glue("\nTotal estimated lost revenue from stock-outs: €",
+         "{format(total_lost, big.mark=',')}\n"))
+```
+# Charts
+```{r}
+p1 <- df_clean %>%
+  mutate(yr_month = floor_date(date, "month")) %>%
+  group_by(yr_month, category) %>%
+  summarise(net_sales = sum(net_sales) / 1e3, .groups = "drop") %>%
+  ggplot(aes(x = yr_month, y = net_sales, colour = category)) +
+  geom_line(linewidth = 0.8) +
+  geom_smooth(method = "lm", se = FALSE,
+              linetype = "dashed", linewidth = 0.5, alpha = 0.5) +
+  scale_y_continuous(labels = dollar_format(prefix = "€", suffix = "K")) +
+  scale_colour_brewer(palette = "Set2") +
+  labs(
+    title    = "Monthly net sales by category (2021–2023)",
+    subtitle = "Dashed = linear trend",
+    x = NULL, y = "Net sales (€K)", colour = "Category"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"),
+        legend.position = "bottom")
+
+print(p1)
+```
+
+```{r}
+p2 <- df_clean %>%
+  group_by(category, promo_flag) %>%
+  summarise(avg_margin = mean(margin_pct, na.rm = TRUE),
+            .groups = "drop") %>%
+  mutate(promo_flag = factor(promo_flag,
+                             labels = c("Non-promo", "Promo"))) %>%
+  ggplot(aes(x = reorder(category, avg_margin),
+             y = avg_margin * 100,
+             fill = promo_flag)) +
+  geom_col(position = "dodge", width = 0.7) +
+  coord_flip() +
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  labs(
+    title    = "Gross margin % — promo vs non-promo days",
+    subtitle = "Promos typically compress margin",
+    x = NULL, y = "Avg margin %", fill = NULL
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"),
+        legend.position = "bottom")
+
+print(p2)
+```
+```{r}
+p3 <- weather_sales %>%
+  ggplot(aes(x = temperature, y = net_sales / 1e3,
+             colour = season)) +
+  geom_point(alpha = 0.4, size = 0.8) +
+  geom_smooth(method = "lm", se = TRUE,
+              colour = "white", linewidth = 1) +
+  scale_colour_brewer(palette = "Set1") +
+  scale_y_continuous(labels = dollar_format(prefix = "€", suffix = "K")) +
+  labs(
+    title    = "Beverages daily sales vs temperature",
+    subtitle = paste0("Pearson r = ", round(cor_temp, 3)),
+    x = "Temperature (°C)", y = "Daily net sales (€K)",
+    colour = "Season"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"),
+        legend.position = "bottom")
+
+print(p3)
+```
+```{r}
+p4 <- df_clean %>%
+  group_by(year, brand) %>%
+  summarise(net_sales = sum(net_sales), .groups = "drop") %>%
+  group_by(year) %>%
+  mutate(share = net_sales / sum(net_sales) * 100) %>%
+  ungroup() %>%
+  ggplot(aes(x = factor(year), y = share,
+             fill = brand)) +
+  geom_col(width = 0.7) +
+  scale_fill_brewer(palette = "Set2") +
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  labs(
+    title    = "Brand revenue share 2021–2023",
+    subtitle = "Stacked = 100% of total store revenue",
+    x = "Year", y = "Revenue share %", fill = "Brand"
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(plot.title = element_text(face = "bold"),
+        legend.position = "bottom")
+
+print(p4)
 ```
 ```{r}
 ```
